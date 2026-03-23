@@ -1,4 +1,35 @@
+# Environment variables
 .env
-venv/
-*.db
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+subscriptions.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# Distribution
+build/
+dist/
