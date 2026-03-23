@@ -2,8 +2,8 @@ import os
 import sqlite3
 import logging
 import requests
-import json
 import asyncio
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -11,264 +11,993 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- Configuration & Setup ---
+# --- Setup ---
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TELEGRAM_TOKEN:
-    raise SystemExit("ERREUR : TELEGRAM_TOKEN manquant dans le fichier .env")
+    raise SystemExit("TELEGRAM_TOKEN missing in .env")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DB_PATH = "subscriptions.db"
+
+# Official Polymarket API URLs
 CLOB_API = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 
 
-# --- Aideurs Base de Données ---
+# --- DB helpers -------------------------------------------------------------
 def init_db():
-    """Initialise la base SQLite pour stocker les abonnements."""
-    with sqlite3.connect(DB_PATH) as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                chat_id TEXT,
-                token_id TEXT,
-                PRIMARY KEY (chat_id, token_id)
-            )
-        """)
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        chat_id TEXT,
+        token_id TEXT,
+        PRIMARY KEY (chat_id, token_id)
+    )
+    """)
+    con.commit()
+    con.close()
 
 def add_subscription(chat_id: int, token_id: str):
-    with sqlite3.connect(DB_PATH) as con:
-        con.execute(
-            "INSERT OR IGNORE INTO subscriptions(chat_id, token_id) VALUES (?, ?)",
-            (str(chat_id), token_id)
-        )
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("INSERT OR IGNORE INTO subscriptions(chat_id, token_id) VALUES (?, ?)",
+                (str(chat_id), token_id))
+    con.commit()
+    con.close()
 
 def remove_subscription(chat_id: int, token_id: str):
-    with sqlite3.connect(DB_PATH) as con:
-        con.execute(
-            "DELETE FROM subscriptions WHERE chat_id=? AND token_id=?",
-            (str(chat_id), token_id)
-        )
-
-def list_tokens():
-    with sqlite3.connect(DB_PATH) as con:
-        rows = con.execute("SELECT DISTINCT token_id FROM subscriptions").fetchall()
-        return [r[0] for r in rows]
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("DELETE FROM subscriptions WHERE chat_id=? AND token_id=?",
+                (str(chat_id), token_id))
+    con.commit()
+    con.close()
 
 def list_subscribers_for_token(token_id: str):
-    with sqlite3.connect(DB_PATH) as con:
-        rows = con.execute(
-            "SELECT chat_id FROM subscriptions WHERE token_id=?", 
-            (token_id,)
-        ).fetchall()
-        return [r[0] for r in rows]
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT chat_id FROM subscriptions WHERE token_id=?", (token_id,))
+    rows = [r[0] for r in cur.fetchall()]
+    con.close()
+    return rows
+
+def list_tokens():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT DISTINCT token_id FROM subscriptions")
+    rows = [r[0] for r in cur.fetchall()]
+    con.close()
+    return rows
 
 
-# --- Logique API Polymarket ---
-def parse_json_field(field):
-    """Décode proprement les champs (Yes/No) sans les caractères [ ou \"."""
-    if isinstance(field, str):
-        try:
-            return json.loads(field)
-        except (json.JSONDecodeError, TypeError):
-            return []
-    return field if isinstance(field, list) else []
-
-def fetch_market_data(token_id: str):
-    """Récupère les prix et volumes via l'API CLOB."""
-    try:
-        # Récupération du prix Mid
-        mid_resp = requests.get(f"{CLOB_API}/midpoint", params={"token_id": token_id}, timeout=10)
-        mid_price = mid_resp.json().get("mid") if mid_resp.status_code == 200 else "N/A"
-
-        # Prix Achat (Bid) et Vente (Ask) précis
-        bid_resp = requests.get(f"{CLOB_API}/price", params={"token_id": token_id, "side": "buy"}, timeout=10)
-        best_bid = float(bid_resp.json().get("price", 0)) if bid_resp.status_code == 200 else None
-
-        ask_resp = requests.get(f"{CLOB_API}/price", params={"token_id": token_id, "side": "sell"}, timeout=10)
-        best_ask = float(ask_resp.json().get("price", 0)) if ask_resp.status_code == 200 else None
-
-        # Profondeur (Size) via /book
-        book_resp = requests.get(f"{CLOB_API}/book", params={"token_id": token_id}, timeout=10)
-        book_data = book_resp.json()
-        bid_size = float(book_data.get("bids", [{}])[0].get("size", 0)) if book_data.get("bids") else 0
-        ask_size = float(book_data.get("asks", [{}])[0].get("size", 0)) if book_data.get("asks") else 0
-
-        spread = round(abs(best_ask - best_bid), 4) if (best_bid and best_ask) else None
-
-        return {
-            "token_id": token_id,
-            "mid_price": mid_price,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "bid_size": bid_size,
-            "ask_size": ask_size,
-            "spread": spread,
-        }
-    except Exception as e:
-        logger.error(f"Erreur API pour {token_id}: {e}")
-        return None
-
-def get_market_info_gamma(token_id: str):
-    """Récupère le contexte du marché via Gamma."""
-    try:
-        resp = requests.get(f"{GAMMA_API}/markets", params={"active": "true", "limit": 100}, timeout=10)
-        markets = resp.json()
-        for m in markets:
-            tokens = parse_json_field(m.get("clobTokenIds"))
-            if token_id in tokens:
-                idx = tokens.index(token_id)
-                outcomes = parse_json_field(m.get("outcomes"))
-                return {
-                    "question": m.get("question", "N/A"),
-                    "outcome": outcomes[idx] if idx < len(outcomes) else "N/A",
-                    "slug": m.get("slug", "")
-                }
-    except:
-        return None
-    return None
-
-
-# --- Formatage ---
-def format_market_message(info: dict, m_info: dict = None):
-    if not info or info.get('best_bid') is None:
-        return "❌ Données indisponibles."
-
-    bid_c = info['best_bid'] * 100
-    ask_c = info['best_ask'] * 100
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Markdown V2"""
+    if text is None:
+        return "N/A"
     
-    lines = [
-        "📊 **Mise à jour Polymarket**",
-        f"❓ `{m_info['question'] if m_info else 'Marché inconnu'}`",
-        f"📍 Pari : **{m_info['outcome'] if m_info else 'N/A'}**",
-        "",
-        f"💰 Prix Mid : **{info['mid_price']}**",
-        f"🟢 **BID (Achat) : {bid_c:.1f}¢** (taille: {info['bid_size']:.0f})",
-        f"🔴 **ASK (Vente) : {ask_c:.1f}¢** (taille: {info['ask_size']:.0f})",
-        f"📏 Spread : {info['spread']*100:.1f}¢" if info['spread'] else "",
-        "",
-        f"⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-    ]
-    return "\n".join(filter(None, lines))
+    text = str(text)  # Convert to string first
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 
-# --- Handlers ---
+# --- Fetch Polymarket (Official CLOB API) -----------------------------------
+def fetch_market_data(token_id: str):
+    """
+    Fetch market data for a token via Polymarket's Gamma API.
+    The Gamma API has outcomePrices which is more reliable than CLOB for all markets.
+    """
+    try:
+        # Clean token_id (remove any trailing dots or whitespace)
+        token_id = str(token_id).strip().rstrip('.')
+        
+        logger.info(f"Fetching data for token: {token_id}")
+        
+        # Use Gamma API to find the market with this token
+        # Try both active and all markets
+        url = f"{GAMMA_API}/markets"
+        params = {"limit": 100}  # Remove active filter to search all markets
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        markets = resp.json()
+        
+        # Find the market containing this token
+        for market in markets:
+            clob_token_ids_raw = market.get("clobTokenIds", [])
+            
+            # Parse JSON string if needed
+            clob_token_ids = []
+            if isinstance(clob_token_ids_raw, str):
+                try:
+                    clob_token_ids = json.loads(clob_token_ids_raw)
+                except json.JSONDecodeError:
+                    continue
+            elif isinstance(clob_token_ids_raw, list):
+                clob_token_ids = clob_token_ids_raw
+            
+            if token_id in clob_token_ids:
+                # Found the market! Get prices from outcomePrices
+                outcome_prices_raw = market.get("outcomePrices", [])
+                outcomes_raw = market.get("outcomes", [])
+                
+                # Parse JSON strings
+                outcome_prices = []
+                if isinstance(outcome_prices_raw, str):
+                    try:
+                        outcome_prices = json.loads(outcome_prices_raw)
+                    except json.JSONDecodeError:
+                        outcome_prices = []
+                elif isinstance(outcome_prices_raw, list):
+                    outcome_prices = outcome_prices_raw
+                
+                outcomes = []
+                if isinstance(outcomes_raw, str):
+                    try:
+                        outcomes = json.loads(outcomes_raw)
+                    except json.JSONDecodeError:
+                        outcomes = []
+                elif isinstance(outcomes_raw, list):
+                    outcomes = outcomes_raw
+                
+                # Get the index of this token
+                token_index = clob_token_ids.index(token_id)
+                price = float(outcome_prices[token_index]) if token_index < len(outcome_prices) else None
+                
+                # Try to get additional data from CLOB (optional, may fail for some markets)
+                best_bid = None
+                best_ask = None
+                bid_size = None
+                ask_size = None
+                
+                try:
+                    book_url = f"{CLOB_API}/book"
+                    book_params = {"token_id": token_id}
+                    book_resp = requests.get(book_url, params=book_params, timeout=5)
+                    if book_resp.status_code == 200:
+                        book_data = book_resp.json()
+                        bids = book_data.get("bids", [])
+                        asks = book_data.get("asks", [])
+                        
+                        best_bid = float(bids[0]["price"]) if bids else None
+                        best_ask = float(asks[0]["price"]) if asks else None
+                        bid_size = float(bids[0]["size"]) if bids else None
+                        ask_size = float(asks[0]["size"]) if asks else None
+                except:
+                    pass  # CLOB data not available, that's okay
+                
+                # Calculate spread if we have bid/ask
+                spread = None
+                if best_bid and best_ask:
+                    spread = round((best_ask - best_bid) * 100, 2)
+                
+                return {
+                    "token_id": token_id,
+                    "mid_price": price,  # Use Gamma price as mid
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "bid_size": bid_size,
+                    "ask_size": ask_size,
+                    "spread": spread,
+                }
+        
+        # Token not found in first batch, search more extensively
+        logger.info(f"Token not found in first 100 markets, searching more...")
+        for offset in [100, 200, 300, 400, 500]:
+            params = {"limit": 100, "offset": offset}
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                break
+            
+            markets = resp.json()
+            if not markets:
+                break
+            
+            for market in markets:
+                clob_token_ids_raw = market.get("clobTokenIds", [])
+                
+                clob_token_ids = []
+                if isinstance(clob_token_ids_raw, str):
+                    try:
+                        clob_token_ids = json.loads(clob_token_ids_raw)
+                    except json.JSONDecodeError:
+                        continue
+                elif isinstance(clob_token_ids_raw, list):
+                    clob_token_ids = clob_token_ids_raw
+                
+                if token_id in clob_token_ids:
+                    # Same logic as above
+                    outcome_prices_raw = market.get("outcomePrices", [])
+                    
+                    outcome_prices = []
+                    if isinstance(outcome_prices_raw, str):
+                        try:
+                            outcome_prices = json.loads(outcome_prices_raw)
+                        except json.JSONDecodeError:
+                            outcome_prices = []
+                    elif isinstance(outcome_prices_raw, list):
+                        outcome_prices = outcome_prices_raw
+                    
+                    token_index = clob_token_ids.index(token_id)
+                    price = float(outcome_prices[token_index]) if token_index < len(outcome_prices) else None
+                    
+                    return {
+                        "token_id": token_id,
+                        "mid_price": price,
+                        "best_bid": None,
+                        "best_ask": None,
+                        "bid_size": None,
+                        "ask_size": None,
+                        "spread": None,
+                    }
+        
+        logger.error(f"Token {token_id} not found in any markets")
+        
+        # Last resort: try to get data from CLOB even if market not in Gamma
+        logger.info(f"Attempting direct CLOB lookup as fallback...")
+        try:
+            mid_url = f"{CLOB_API}/midpoint"
+            mid_params = {"token_id": token_id}
+            mid_resp = requests.get(mid_url, params=mid_params, timeout=10)
+            
+            if mid_resp.status_code == 200:
+                mid_data = mid_resp.json()
+                mid_price = mid_data.get("mid")
+                
+                # Get order book
+                book_url = f"{CLOB_API}/book"
+                book_params = {"token_id": token_id}
+                book_resp = requests.get(book_url, params=book_params, timeout=10)
+                
+                if book_resp.status_code == 200:
+                    book_data = book_resp.json()
+                    bids = book_data.get("bids", [])
+                    asks = book_data.get("asks", [])
+                    
+                    best_bid = float(bids[-1]["price"]) if bids else None
+                    best_ask = float(asks[-1]["price"]) if asks else None
+                    bid_size = float(bids[-1]["size"]) if bids else None
+                    ask_size = float(asks[-1]["size"]) if asks else None
+                    
+                    spread = None
+                    if best_bid and best_ask:
+                        spread = round((best_ask - best_bid) * 100, 2)
+                    
+                    logger.info(f"Found token data in CLOB directly")
+                    return {
+                        "token_id": token_id,
+                        "mid_price": mid_price,
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "bid_size": bid_size,
+                        "ask_size": ask_size,
+                        "spread": spread,
+                    }
+        except Exception as e:
+            logger.warning(f"CLOB fallback also failed: {e}")
+        
+        return None
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP Error for token {token_id}: {e.response.status_code} - {e.response.text}")
+        return None
+    except Exception as e:
+        logger.exception(f"Error in fetch_market_data for token {token_id}: {e}")
+        return None
+
+
+import os
+import sqlite3
+import logging
+import requests
+import asyncio
+import json
+from datetime import datetime
+from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# --- Setup ---
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+if not TELEGRAM_TOKEN:
+    raise SystemExit("TELEGRAM_TOKEN missing in .env")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+DB_PATH = "subscriptions.db"
+
+# Official Polymarket API URLs
+CLOB_API = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
+
+
+# --- DB helpers -------------------------------------------------------------
+def init_db():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        chat_id TEXT,
+        token_id TEXT,
+        PRIMARY KEY (chat_id, token_id)
+    )
+    """)
+    con.commit()
+    con.close()
+
+def add_subscription(chat_id: int, token_id: str):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("INSERT OR IGNORE INTO subscriptions(chat_id, token_id) VALUES (?, ?)",
+                (str(chat_id), token_id))
+    con.commit()
+    con.close()
+
+def remove_subscription(chat_id: int, token_id: str):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("DELETE FROM subscriptions WHERE chat_id=? AND token_id=?",
+                (str(chat_id), token_id))
+    con.commit()
+    con.close()
+
+def list_subscribers_for_token(token_id: str):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT chat_id FROM subscriptions WHERE token_id=?", (token_id,))
+    rows = [r[0] for r in cur.fetchall()]
+    con.close()
+    return rows
+
+def list_tokens():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT DISTINCT token_id FROM subscriptions")
+    rows = [r[0] for r in cur.fetchall()]
+    con.close()
+    return rows
+
+
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Markdown V2"""
+    if text is None:
+        return "N/A"
+    
+    text = str(text)  # Convert to string first
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
+# --- Fetch Polymarket (Official CLOB API) -----------------------------------
+def fetch_market_data(token_id: str):
+    """
+    Fetch market data for a token via Polymarket's Gamma API.
+    The Gamma API has outcomePrices which is more reliable than CLOB for all markets.
+    """
+    try:
+        # Clean token_id (remove any trailing dots or whitespace)
+        token_id = str(token_id).strip().rstrip('.')
+        
+        logger.info(f"Fetching data for token: {token_id}")
+        
+        # Use Gamma API to find the market with this token
+        # Try both active and all markets
+        url = f"{GAMMA_API}/markets"
+        params = {"limit": 100}  # Remove active filter to search all markets
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        markets = resp.json()
+        
+        # Find the market containing this token
+        for market in markets:
+            clob_token_ids_raw = market.get("clobTokenIds", [])
+            
+            # Parse JSON string if needed
+            clob_token_ids = []
+            if isinstance(clob_token_ids_raw, str):
+                try:
+                    clob_token_ids = json.loads(clob_token_ids_raw)
+                except json.JSONDecodeError:
+                    continue
+            elif isinstance(clob_token_ids_raw, list):
+                clob_token_ids = clob_token_ids_raw
+            
+            if token_id in clob_token_ids:
+                # Found the market! Get prices from outcomePrices
+                outcome_prices_raw = market.get("outcomePrices", [])
+                outcomes_raw = market.get("outcomes", [])
+                
+                # Parse JSON strings
+                outcome_prices = []
+                if isinstance(outcome_prices_raw, str):
+                    try:
+                        outcome_prices = json.loads(outcome_prices_raw)
+                    except json.JSONDecodeError:
+                        outcome_prices = []
+                elif isinstance(outcome_prices_raw, list):
+                    outcome_prices = outcome_prices_raw
+                
+                outcomes = []
+                if isinstance(outcomes_raw, str):
+                    try:
+                        outcomes = json.loads(outcomes_raw)
+                    except json.JSONDecodeError:
+                        outcomes = []
+                elif isinstance(outcomes_raw, list):
+                    outcomes = outcomes_raw
+                
+                # Get the index of this token
+                token_index = clob_token_ids.index(token_id)
+                price = float(outcome_prices[token_index]) if token_index < len(outcome_prices) else None
+                
+                # Try to get additional data from CLOB (optional, may fail for some markets)
+                best_bid = None
+                best_ask = None
+                bid_size = None
+                ask_size = None
+                
+                try:
+                    book_url = f"{CLOB_API}/book"
+                    book_params = {"token_id": token_id}
+                    book_resp = requests.get(book_url, params=book_params, timeout=5)
+                    if book_resp.status_code == 200:
+                        book_data = book_resp.json()
+                        bids = book_data.get("bids", [])
+                        asks = book_data.get("asks", [])
+                        
+                        best_bid = float(bids[0]["price"]) if bids else None
+                        best_ask = float(asks[0]["price"]) if asks else None
+                        bid_size = float(bids[0]["size"]) if bids else None
+                        ask_size = float(asks[0]["size"]) if asks else None
+                except:
+                    pass  # CLOB data not available, that's okay
+                
+                # Calculate spread if we have bid/ask
+                spread = None
+                if best_bid and best_ask:
+                    spread = round((best_ask - best_bid) * 100, 2)
+                
+                return {
+                    "token_id": token_id,
+                    "mid_price": price,  # Use Gamma price as mid
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "bid_size": bid_size,
+                    "ask_size": ask_size,
+                    "spread": spread,
+                }
+        
+        # Token not found in first batch, search more extensively
+        logger.info(f"Token not found in first 100 markets, searching more...")
+        for offset in [100, 200, 300, 400, 500]:
+            params = {"limit": 100, "offset": offset}
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                break
+            
+            markets = resp.json()
+            if not markets:
+                break
+            
+            for market in markets:
+                clob_token_ids_raw = market.get("clobTokenIds", [])
+                
+                clob_token_ids = []
+                if isinstance(clob_token_ids_raw, str):
+                    try:
+                        clob_token_ids = json.loads(clob_token_ids_raw)
+                    except json.JSONDecodeError:
+                        continue
+                elif isinstance(clob_token_ids_raw, list):
+                    clob_token_ids = clob_token_ids_raw
+                
+                if token_id in clob_token_ids:
+                    # Same logic as above
+                    outcome_prices_raw = market.get("outcomePrices", [])
+                    
+                    outcome_prices = []
+                    if isinstance(outcome_prices_raw, str):
+                        try:
+                            outcome_prices = json.loads(outcome_prices_raw)
+                        except json.JSONDecodeError:
+                            outcome_prices = []
+                    elif isinstance(outcome_prices_raw, list):
+                        outcome_prices = outcome_prices_raw
+                    
+                    token_index = clob_token_ids.index(token_id)
+                    price = float(outcome_prices[token_index]) if token_index < len(outcome_prices) else None
+                    
+                    return {
+                        "token_id": token_id,
+                        "mid_price": price,
+                        "best_bid": None,
+                        "best_ask": None,
+                        "bid_size": None,
+                        "ask_size": None,
+                        "spread": None,
+                    }
+        
+        logger.error(f"Token {token_id} not found in any markets")
+        
+        # Last resort: try to get data from CLOB even if market not in Gamma
+        logger.info(f"Attempting direct CLOB lookup as fallback...")
+        try:
+            mid_url = f"{CLOB_API}/midpoint"
+            mid_params = {"token_id": token_id}
+            mid_resp = requests.get(mid_url, params=mid_params, timeout=10)
+            
+            if mid_resp.status_code == 200:
+                mid_data = mid_resp.json()
+                mid_price = mid_data.get("mid")
+                
+                # Get order book
+                book_url = f"{CLOB_API}/book"
+                book_params = {"token_id": token_id}
+                book_resp = requests.get(book_url, params=book_params, timeout=10)
+                
+                if book_resp.status_code == 200:
+                    book_data = book_resp.json()
+                    bids = book_data.get("bids", [])
+                    asks = book_data.get("asks", [])
+                    
+                    best_bid = float(bids[-1]["price"]) if bids else None
+                    best_ask = float(asks[-1]["price"]) if asks else None
+                    bid_size = float(bids[-1]["size"]) if bids else None
+                    ask_size = float(asks[-1]["size"]) if asks else None
+                    
+                    spread = None
+                    if best_bid and best_ask:
+                        spread = round((best_ask - best_bid) * 100, 2)
+                    
+                    logger.info(f"Found token data in CLOB directly")
+                    return {
+                        "token_id": token_id,
+                        "mid_price": mid_price,
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "bid_size": bid_size,
+                        "ask_size": ask_size,
+                        "spread": spread,
+                    }
+        except Exception as e:
+            logger.warning(f"CLOB fallback also failed: {e}")
+        
+        return None
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP Error for token {token_id}: {e.response.status_code} - {e.response.text}")
+        return None
+    except Exception as e:
+        logger.exception(f"Error in fetch_market_data for token {token_id}: {e}")
+        return None
+
+
+# Cache to prevent looking several times for the same token
+_market_info_cache = {}
+
+def get_market_info_from_gamma(token_id: str):
+    """
+    Fetch market info (question, title) via Gamma API.
+    Uses caching to avoid repeated lookups.
+    """
+    # Check cache first
+    if token_id in _market_info_cache:
+        logger.info(f"Returning cached info for token {token_id[:20]}...")
+        return _market_info_cache[token_id]
+    
+    try:
+        # Search in all markets (not just active)
+        url = f"{GAMMA_API}/markets"
+        
+        logger.info(f"Searching for token {token_id[:20]}... in Gamma API")
+        
+        # Try multiple pages to find the token - search more aggressively
+        for offset in range(0, 1000, 100):  # Search up to 1000 markets
+            params = {"limit": 100, "offset": offset}
+            resp = requests.get(url, params=params, timeout=10)
+            
+            if resp.status_code != 200:
+                logger.warning(f"Failed to fetch markets at offset {offset}: {resp.status_code}")
+                break
+                
+            markets = resp.json()
+            
+            if not markets:
+                break
+            
+            # Search for the market containing this token_id
+            for market in markets:
+                clob_token_ids_raw = market.get("clobTokenIds", [])
+                outcomes_raw = market.get("outcomes", [])
+                
+                # Parse JSON strings if needed
+                clob_token_ids = []
+                if isinstance(clob_token_ids_raw, str):
+                    try:
+                        clob_token_ids = json.loads(clob_token_ids_raw)
+                    except json.JSONDecodeError:
+                        continue
+                elif isinstance(clob_token_ids_raw, list):
+                    clob_token_ids = clob_token_ids_raw
+                
+                outcomes = []
+                if isinstance(outcomes_raw, str):
+                    try:
+                        outcomes = json.loads(outcomes_raw)
+                    except json.JSONDecodeError:
+                        outcomes = []
+                elif isinstance(outcomes_raw, list):
+                    outcomes = outcomes_raw
+                
+                if token_id in clob_token_ids:
+                    # Find token index
+                    token_index = clob_token_ids.index(token_id)
+                    outcome = outcomes[token_index] if token_index < len(outcomes) else "Unknown"
+                    
+                    result = {
+                        "question": market.get("question", "N/A"),
+                        "outcome": outcome,
+                        "slug": market.get("slug", ""),
+                    }
+                    
+                    # Cache the result
+                    _market_info_cache[token_id] = result
+                    logger.info(f"✅ Found market info for token: {market.get('question', 'N/A')[:50]}")
+                    
+                    return result
+        
+        logger.warning(f"Token {token_id[:20]}... not found in Gamma API after searching 1000 markets")
+        return None
+    except Exception as e:
+        logger.exception(f"Error in get_market_info_from_gamma: {e}")
+        return None
+
+
+# --- Formatting -------------------------------------------------------------
+def format_market_message(info: dict, market_info: dict = None):
+    if not info:
+        return "❌ Error: unable to fetch market data\\."
+
+    lines = ["📊 *Polymarket Update*", ""]
+    
+    # Always show market info if available
+    if market_info:
+        question = escape_markdown(market_info.get('question', 'N/A'))
+        outcome = escape_markdown(market_info.get('outcome', 'N/A'))
+        lines.extend([
+            f"*Market:* {question}",
+            f"*Outcome:* {outcome}",
+            ""
+        ])
+    else:
+        # If no market info, at least show we're trying to get it
+        lines.append("*Market:* Unknown")
+        lines.append("")
+    
+    token_short = escape_markdown(str(info.get('token_id', 'N/A'))[:20] + "...")
+    mid = escape_markdown(info.get('mid_price') if info.get('mid_price') is not None else 'N/A')
+    bid = escape_markdown(info.get('best_bid') if info.get('best_bid') is not None else 'N/A')
+    ask = escape_markdown(info.get('best_ask') if info.get('best_ask') is not None else 'N/A')
+    bid_size = escape_markdown(info.get('bid_size') if info.get('bid_size') is not None else 'N/A')
+    ask_size = escape_markdown(info.get('ask_size') if info.get('ask_size') is not None else 'N/A')
+    
+    lines.extend([
+        f"🔑 *Token ID:* `{token_short}`",
+        "",
+        f"💰 *Mid price:* {mid}",
+        f"📈 *Best bid:* {bid} \\(size: {bid_size}\\)",
+        f"📉 *Best ask:* {ask} \\(size: {ask_size}\\)",
+    ])
+    
+    if info.get('spread') is not None:
+        spread = escape_markdown(info.get('spread'))
+        lines.append(f"📏 *Spread:* {spread}%")
+    
+    # Format timestamp carefully
+    timestamp_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = escape_markdown(timestamp_str)
+    lines.extend([
+        "",
+        f"⏰ {timestamp} UTC"
+    ])
+    
+    return "\n".join(lines)
+
+
+# --- Periodic Job -----------------------------------------------------------
+async def job_send_updates(application):
+    logger.info("⏱️ Running hourly job…")
+
+    tokens = list_tokens()
+    if not tokens:
+        logger.info("No subscriptions at the moment.")
+        return
+
+    for token_id in tokens:
+        info = fetch_market_data(token_id)
+        market_info = get_market_info_from_gamma(token_id)
+        msg = format_market_message(info, market_info)
+        subscribers = list_subscribers_for_token(token_id)
+
+        for chat_id in subscribers:
+            try:
+                await application.bot.send_message(
+                    chat_id=int(chat_id), 
+                    text=msg,
+                    parse_mode='MarkdownV2'
+                )
+                logger.info(f"✅ Message sent to {chat_id}")
+            except Exception as e:
+                logger.warning(f"❌ Error sending to {chat_id}: {e}")
+
+
+# --- Telegram Handlers ------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 **Bienvenue sur le bot Polymarket!**\n\n"
-        "• `/search <terme>` - Chercher des marchés\n"
-        "• `/subscribe <id>` - S'abonner aux prix\n"
-        "• `/unsubscribe <id>` - Se désabonner\n"
-        "• `/status` - Voir vos abonnements\n"
-        "• `/check <id>` - Vérifier un prix\n"
-        "• `/test` - Forcer la mise à jour immédiate",
-        parse_mode='Markdown'
+        "👋 *Welcome to the Polymarket bot\\!*\n\n"
+        "Available commands:\n"
+        "• `/subscribe <token_id>` \\- Subscribe to a token\n"
+        "• `/unsubscribe <token_id>` \\- Unsubscribe\n"
+        "• `/status` \\- View your subscriptions\n"
+        "• `/check <token_id>` \\- Check current price\n"
+        "• `/search <term>` \\- Search for markets\n"
+        "• `/test` \\- Test immediate send \\(debug\\)\n\n"
+        "💡 You will receive updates every hour\\.\n\n"
+        "🔍 To find a token\\_id, use `/search` or go to "
+        "polymarket\\.com and get the token from the market URL\\.",
+        parse_mode='MarkdownV2'
     )
 
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    if not query:
-        await update.message.reply_text("Usage : `/search trump`")
-        return
-    try:
-        resp = requests.get(f"{GAMMA_API}/events", params={"q": query, "active": "true"}, timeout=10)
-        events = resp.json()
-        if not events:
-            await update.message.reply_text("❌ Aucun résultat.")
-            return
-        msg = f"🔍 **Résultats pour '{query}' :**\n\n"
-        for event in events[:5]:
-            msg += f"📅 **{event['title']}**\n"
-            for m in event.get('markets', []):
-                tokens = parse_json_field(m.get('clobTokenIds'))
-                outcomes = parse_json_field(m.get('outcomes'))
-                if tokens:
-                    msg += f"  ❓ {m['question'][:50]}...\n"
-                    for i, t_id in enumerate(tokens):
-                        out_name = outcomes[i] if i < len(outcomes) else "?"
-                        msg += f"    • {out_name}: `/subscribe {t_id}`\n"
-            msg += "\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    except:
-        await update.message.reply_text("❌ Erreur de recherche.")
-
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
-    t_id = context.args[0]
-    add_subscription(update.effective_chat.id, t_id)
-    info = fetch_market_data(t_id)
-    m_info = get_market_info_gamma(t_id)
-    await update.message.reply_text(f"✅ Abonné !\n\n{format_market_message(info, m_info)}", parse_mode='Markdown')
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/subscribe <token_id>`\n\n"
+            "Example: `/subscribe 21742633143463906...`"
+        )
+        return
+
+    token_id = context.args[0]
+    
+    # Verify token exists
+    info = fetch_market_data(token_id)
+    if not info:
+        token_short = escape_markdown(token_id[:20] + "...")
+        await update.message.reply_text(
+            f"❌ Unable to fetch data for token `{token_short}`\n"
+            "Check the token ID\\.",
+            parse_mode='MarkdownV2'
+        )
+        return
+    
+    add_subscription(update.effective_chat.id, token_id)
+    market_info = get_market_info_from_gamma(token_id)
+    
+    await update.message.reply_text(
+        f"✅ Subscribed to token\\!\n\n"
+        f"{format_market_message(info, market_info)}",
+        parse_mode='MarkdownV2'
+    )
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
-    t_id = context.args[0]
-    remove_subscription(update.effective_chat.id, t_id)
-    await update.message.reply_text(f"✅ Désabonné de `{t_id[:10]}...`")
+    if not context.args:
+        await update.message.reply_text("Usage: `/unsubscribe <token_id>`", parse_mode='MarkdownV2')
+        return
+
+    token_id = context.args[0]
+    remove_subscription(update.effective_chat.id, token_id)
+    token_short = escape_markdown(token_id[:20] + "...")
+    await update.message.reply_text(f"✅ Unsubscribed from token `{token_short}`", parse_mode='MarkdownV2')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with sqlite3.connect(DB_PATH) as con:
-        rows = con.execute("SELECT token_id FROM subscriptions WHERE chat_id=?", (str(update.effective_chat.id),)).fetchall()
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT token_id FROM subscriptions WHERE chat_id=?",
+                (str(update.effective_chat.id),))
+    rows = [r[0] for r in cur.fetchall()]
+    con.close()
+
     if not rows:
-        await update.message.reply_text("Aucun abonnement.")
+        await update.message.reply_text("You are not subscribed to any markets.")
     else:
-        msg = "📋 **Vos abonnements :**\n\n"
-        for (t_id,) in rows:
-            m_info = get_market_info_gamma(t_id)
-            name = f"{m_info['outcome']} - {m_info['question'][:30]}..." if m_info else t_id[:15]
-            msg += f"• `{t_id}`\n({name})\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
+        msg = "📋 *Your subscriptions:*\n\n"
+        for token in rows:
+            # Get market info
+            market_info = get_market_info_from_gamma(token)
+            if market_info:
+                question = escape_markdown(market_info.get('question', 'N/A')[:50] + "...")
+                outcome = escape_markdown(market_info.get('outcome', 'N/A'))
+                msg += f"• {outcome} \\- {question}\n"
+            else:
+                token_short = escape_markdown(token[:20] + "...")
+                msg += f"• `{token_short}`\n"
+        
+        await update.message.reply_text(msg, parse_mode='MarkdownV2')
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
-    t_id = context.args[0]
-    info = fetch_market_data(t_id)
-    m_info = get_market_info_gamma(t_id)
-    await update.message.reply_text(format_market_message(info, m_info), parse_mode='Markdown')
+    """Check current price of a token without subscribing"""
+    if not context.args:
+        await update.message.reply_text("Usage: `/check <token_id>`", parse_mode='MarkdownV2')
+        return
+
+    token_id = context.args[0]
+    info = fetch_market_data(token_id)
+    market_info = get_market_info_from_gamma(token_id)
+    msg = format_market_message(info, market_info)
+    await update.message.reply_text(msg, parse_mode='MarkdownV2')
 
 async def test_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Test : Envoi manuel des mises à jour...")
-    await job_send_updates(context.application)
-    await update.message.reply_text("✅ Test terminé.")
+    """Manually trigger update sending (for testing)"""
+    await update.message.reply_text("🔄 Sending updates...")
+    
+    # Get application from context
+    application = context.application
+    await job_send_updates(application)
+    
+    await update.message.reply_text("✅ Updates sent!")
+
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search for Polymarket markets"""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/search <term>`\n\n"
+            "Example: `/search bitcoin` or `/search trump` or `/search paris`",
+            parse_mode='MarkdownV2'
+        )
+        return
+
+    search_term = " ".join(context.args)
+    
+    try:
+        # Use official search endpoint
+        url = f"{GAMMA_API}/public-search"
+        params = {"q": search_term}
+        
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        events = data.get("events", [])
+        
+        if not events:
+            await update.message.reply_text(
+                f"❌ No results found for '{escape_markdown(search_term)}'\\.",
+                parse_mode='MarkdownV2'
+            )
+            return
+        
+        # Build message with size limit
+        msg = f"🔍 *{len(events)} result\\(s\\) for '{escape_markdown(search_term)}'*\n\n"
+        MAX_LENGTH = 3800  # Safety limit under Telegram's 4096
+        
+        count = 0
+        for event in events:
+            if count >= 3:  # Limit to 3 events instead of 5
+                break
+            
+            title = event.get("title", "N/A")
+            markets = event.get("markets", [])
+            
+            if not markets:
+                continue
+            
+            # Build block for this event
+            title_short = title[:80] if len(title) <= 80 else title[:77] + "..."
+            event_msg = f"📅 *{escape_markdown(title_short)}*\n"
+            
+            # Limit to 2 markets per event
+            for market in markets[:2]:
+                question = market.get("question", "N/A")
+                tokens_raw = market.get("clobTokenIds", [])
+                outcomes_raw = market.get("outcomes", [])
+                
+                # Parse JSON strings
+                tokens = []
+                if isinstance(tokens_raw, str):
+                    try:
+                        tokens = json.loads(tokens_raw)
+                    except json.JSONDecodeError:
+                        tokens = []
+                elif isinstance(tokens_raw, list):
+                    tokens = tokens_raw
+                
+                outcomes = []
+                if isinstance(outcomes_raw, str):
+                    try:
+                        outcomes = json.loads(outcomes_raw)
+                    except json.JSONDecodeError:
+                        outcomes = []
+                elif isinstance(outcomes_raw, list):
+                    outcomes = outcomes_raw
+                
+                # Shorten question
+                question_short = question if len(question) <= 50 else question[:47] + "..."
+                event_msg += f"  ❓ {escape_markdown(question_short)}\n"
+                
+                if tokens and outcomes:
+                    # Show only first 2 outcomes with FULL token IDs (no truncation)
+                    for i, token in enumerate(tokens[:2]):
+                        outcome = outcomes[i] if i < len(outcomes) else "?"
+                        # Don't truncate token_id - show it in full for the command to work
+                        event_msg += f"     • {escape_markdown(outcome)}: `/sub {token}`\n"
+                else:
+                    event_msg += f"     ⚠️  Unavailable\n"
+            
+            if len(markets) > 2:
+                markets_diff = len(markets) - 2
+                event_msg += f"  _{markets_diff} other market\\(s\\)_\n"
+            
+            event_msg += "\n"
+            
+            # Check if we exceed limit
+            if len(msg + event_msg) > MAX_LENGTH:
+                break
+            
+            msg += event_msg
+            count += 1
+        
+        if len(events) > count:
+            events_diff = len(events) - count
+            msg += f"_{events_diff} other event\\(s\\)_\n"
+        
+        msg += f"\n💡 Use `/sub <token>` to subscribe"
+        
+        await update.message.reply_text(msg, parse_mode='MarkdownV2')
+        
+    except Exception as e:
+        logger.exception(f"Error during search: {e}")
+        await update.message.reply_text("❌ Error searching markets.")
 
 
-# --- Jobs ---
-async def job_send_updates(application):
-    tokens = list_tokens()
-    for t_id in tokens:
-        info = fetch_market_data(t_id)
-        m_info = get_market_info_gamma(t_id)
-        msg = format_market_message(info, m_info)
-        for chat_id in list_subscribers_for_token(t_id):
-            try: await application.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode='Markdown')
-            except: continue
-
+# --- Main -------------------------------------------------------------------
 async def post_init(application):
+    """Function called after application initialization"""
+    # Configure scheduler for hourly updates
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(job_send_updates, 'interval', hours=1, args=[application])
+    scheduler.add_job(
+        job_send_updates,
+        'interval',
+        hours=1,
+        args=[application],
+        id='hourly_updates',
+        misfire_grace_time=300,  # 5 minutes grace if job is missed
+        coalesce=True  # Merge missed executions into one
+    )
     scheduler.start()
+    logger.info("✅ Scheduler started - updates every hour")
 
-
-# --- Main ---
 def main():
+    # Initialize database
     init_db()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("subscribe", subscribe))
-    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("check", check))
-    app.add_handler(CommandHandler("search", search))
-    app.add_handler(CommandHandler("test", test_job))
+    # Create application
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     
-    logger.info("🤖 Bot Polymarket démarré avec tous les handlers")
-    app.run_polling()
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("subscribe", subscribe))
+    application.add_handler(CommandHandler("sub", subscribe))  # Short alias
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    application.add_handler(CommandHandler("unsub", unsubscribe))  # Short alias
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("check", check))
+    application.add_handler(CommandHandler("search", search))
+    application.add_handler(CommandHandler("test", test_job))
+    
+    # Start bot
+    logger.info("🤖 Polymarket bot started")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
