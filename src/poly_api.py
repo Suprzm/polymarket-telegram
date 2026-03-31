@@ -67,10 +67,10 @@ def fetch_market_data(token_id: str):
                         bids = book_data.get("bids", [])
                         asks = book_data.get("asks", [])
                         
-                        best_bid = float(bids[0]["price"]) if bids else None
-                        best_ask = float(asks[0]["price"]) if asks else None
-                        bid_size = float(bids[0]["size"]) if bids else None
-                        ask_size = float(asks[0]["size"]) if asks else None
+                        best_bid = float(bids[-1]["price"]) if bids else None
+                        best_ask = float(asks[-1]["price"]) if asks else None
+                        bid_size = float(bids[-1]["size"]) if bids else None
+                        ask_size = float(asks[-1]["size"]) if asks else None
                 except:
                     pass
                 
@@ -159,10 +159,10 @@ def fetch_market_data(token_id: str):
                     bids = book_data.get("bids", [])
                     asks = book_data.get("asks", [])
                     
-                    best_bid = float(bids[0]["price"]) if bids else None
-                    best_ask = float(asks[0]["price"]) if asks else None
-                    bid_size = float(bids[0]["size"]) if bids else None
-                    ask_size = float(asks[0]["size"]) if asks else None
+                    best_bid = float(bids[-1]["price"]) if bids else None
+                    best_ask = float(asks[-1]["price"]) if asks else None
+                    bid_size = float(bids[-1]["size"]) if bids else None
+                    ask_size = float(asks[-1]["size"]) if asks else None
                     
                     spread = None
                     if best_bid and best_ask:
