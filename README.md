@@ -1,14 +1,33 @@
 # 🤖 Polymarket Telegram Bot
 
-A Telegram bot for tracking Polymarket prediction markets with hourly price updates.
+A modular Telegram bot for tracking Polymarket prediction markets with hourly price updates.
 
 ## ✨ Features
 
 - 🔍 **Search Markets** - Find markets by keyword
 - 📊 **Subscribe to Updates** - Get hourly price notifications
 - 💰 **Real-time Prices** - Check current market prices
-- 🗄️ **Smart Caching** - Fast lookups with 3-tier database system
+- 🗄️ **Smart Caching** - 3-tier database system for fast lookups
 - 📈 **Detailed Info** - Market name, outcome, bid/ask, spread, timestamp
+- 🏗️ **Modular Architecture** - Clean, maintainable codebase
+
+## 📁 Project Structure
+polymarket/
+├── src/
+│   ├── init.py       # Package initialization
+│   ├── database.py       # Database operations
+│   ├── poly_api.py       # Polymarket API interactions
+│   ├── formatter.py      # Message formatting
+│   └── handlers.py       # Telegram command handlers
+├── data/
+│   └── subscriptions.db  # SQLite database (auto-created)
+├── venv/                 # Virtual environment
+├── .env                  # Environment variables (not committed)
+├── .env.example          # Template for .env
+├── .gitignore           # Git ignore rules
+├── main.py              # Application entry point
+├── README.md            # This file
+└── requirements.txt     # Python dependencies
 
 ## 🚀 Quick Start
 
@@ -21,8 +40,8 @@ A Telegram bot for tracking Polymarket prediction markets with hourly price upda
 ### 2. Installation
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/polymarket-telegram-bot.git
-cd polymarket-telegram-bot
+git clone https://github.com/YOUR_USERNAME/polymarket.git
+cd polymarket
 
 # Create virtual environment
 python3 -m venv venv
@@ -34,23 +53,15 @@ pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-nano .env  # Edit with your Telegram token
+nano .env  # Add your TELEGRAM_TOKEN
 ```
 
-### 3. Get Your Telegram Bot Token
-
-1. Open Telegram and search for [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`
-3. Follow the instructions to create your bot
-4. Copy the token and paste it in `.env`
-
-### 4. Run the Bot
+### 3. Run the Bot
 ```bash
-python bot_polymarket.py
+python main.py
 ```
 
 You should see:
-
 INFO:main:🤖 Polymarket bot started
 INFO:main:✅ Scheduler started - updates every hour
 
@@ -60,138 +71,93 @@ INFO:main:✅ Scheduler started - updates every hour
 |---------|-------------|---------|
 | `/start` | Welcome message and help | `/start` |
 | `/search <term>` | Search for markets | `/search bitcoin` |
-| `/subscribe <token_id>` | Subscribe to hourly updates | `/subscribe 297637...` |
+| `/subscribe <token_id>` | Subscribe to updates | `/subscribe 297637...` |
 | `/sub <token_id>` | Short alias for subscribe | `/sub 297637...` |
-| `/unsubscribe <token_id>` | Unsubscribe from updates | `/unsubscribe 297637...` |
+| `/unsubscribe <token_id>` | Unsubscribe | `/unsubscribe 297637...` |
 | `/unsub <token_id>` | Short alias for unsubscribe | `/unsub 297637...` |
 | `/status` | View your subscriptions | `/status` |
 | `/check <token_id>` | Check current price | `/check 297637...` |
-| `/reset` | Delete all your subscriptions | `/reset` |
+| `/reset` | Delete all subscriptions | `/reset` |
 | `/test` | Manually trigger updates (debug) | `/test` |
 
 ## 🎯 Usage Example
 
-1. Search for a market:
+Search for a market:
 /search trump
-2. Bot shows results with token IDs:
+Bot shows results:
 📅 US Presidential Election
 ❓ Will Trump win 2024?
 • Yes: /sub 29763725280755533...
 • No: /sub 15902934770940509...
-3. Subscribe to updates:
+Subscribe:
 /sub 29763725280755533...
-4. Receive hourly updates automatically! 🎉
-5. To remove all subscriptions:
-/reset
-/confirm_reset
+Receive hourly updates! 🎉
 
 
 ## 🗄️ Database Architecture
 
-The bot uses SQLite with 3 tables:
+### Three-tier caching system:
 
-### `subscriptions`
-- Stores user subscriptions
-- Links chat_id to token_id
+1. **`search_cache`** (temporary)
+   - Cleared on each `/search`
+   - Stores ALL tokens found
+   - Fast subscription lookups
 
-### `market_metadata`
-- Permanent storage of market info
-- Question, outcome, slug, event_title
-- Populated from search_cache on subscribe
+2. **`market_metadata`** (permanent)
+   - Populated from search_cache on `/subscribe`
+   - Persistent market information
+   - Used for hourly updates
 
-### `search_cache`
-- Temporary cache cleared on each search
-- Pre-fills with all tokens from search results
-- Ensures "Unknown" never appears after search
+3. **`subscriptions`**
+   - Links users to tokens
+   - Core subscription tracking
 
-## 🔧 Technical Details
+## 🔧 Module Overview
 
-### APIs Used
+### `src/database.py`
+All database operations: subscriptions, caching, metadata management.
 
-- **Telegram Bot API** - User interaction
-- **Polymarket Gamma API** - Market search and metadata
-  - Endpoint: `https://gamma-api.polymarket.com`
-  - `/public-search` - Full-text market search
-  - `/markets` - Market listings with prices
-- **Polymarket CLOB API** - Order book data (fallback)
-  - Endpoint: `https://clob.polymarket.com`
-  - `/midpoint` - Mid price
-  - `/book` - Bid/ask spreads
+### `src/poly_api.py`
+Polymarket API interactions: market data, prices, token lookups.
 
-### Data Flow
-/search bitcoin
-↓
-Gamma API public-search
-↓
-Save ALL tokens → search_cache
-↓
-Display to user
-↓
-User: /sub <token>
-↓
-Get from search_cache → Save to market_metadata
-↓
-Add subscription
-↓
-Hourly job reads market_metadata (fast!)
-↓
-Send updates with full context
+### `src/formatter.py`
+Message formatting: Markdown escaping, price display.
 
-## 📊 Update Format
-📊 Polymarket Update
-Market: Will Bitcoin hit $100k by year end?
-Outcome: Yes
-🔑 Token ID: 29763725280755533...
-💰 Mid price: 0.65
-📈 Best bid: 0.64 (size: 100)
-📉 Best ask: 0.66 (size: 150)
-📏 Spread: 2.0%
-⏰ 2025-03-24 15:30:45 UTC
+### `src/handlers.py`
+Telegram command handlers: search, subscribe, status, etc.
 
-## 🐛 Troubleshooting
-
-### Bot doesn't start
-- Check your `TELEGRAM_TOKEN` in `.env`
-- Verify token with [@BotFather](https://t.me/BotFather)
-- Check Python version: `python --version` (must be 3.8+)
-
-### "Unknown" market name in updates
-- Run `/search` first to populate cache
-- Subscribe immediately after search
-- Market metadata is saved on first subscribe
-
-### No hourly updates received
-- Check bot logs for errors
-- Verify subscription: `/status`
-- Test manually: `/test`
+### `main.py`
+Application entry point: bot initialization, scheduler, main loop.
 
 ## 🔒 Security
 
 - ✅ Never commit `.env` to Git
 - ✅ Use `.gitignore` to exclude secrets
 - ✅ Revoke tokens if accidentally exposed
-- ✅ Use pre-commit hooks to prevent leaks
+- ✅ Use environment variables for all secrets
 
 ## 📝 Development
 
-### Add a new command
+### Running in development
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Run with debug logging
+python main.py
+```
+
+### Adding a new command
+
+1. Create handler in `src/handlers.py`:
 ```python
 async def my_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Hello!")
-
-# In main()
-application.add_handler(CommandHandler("mycommand", my_command))
 ```
 
-### Modify update frequency
+2. Register in `main.py`:
 ```python
-# In post_init()
-scheduler.add_job(
-    job_send_updates,
-    'interval',
-    hours=2,  # Change from 1 to 2 hours
-    # ...
-)
+application.add_handler(CommandHandler("mycommand", my_command))
 ```
 
 ## 🤝 Contributing
@@ -208,16 +174,9 @@ MIT License - feel free to use and modify!
 
 ## 🙏 Acknowledgments
 
-- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) - Telegram Bot framework
-- [Polymarket](https://polymarket.com) - Prediction market platform
-- [APScheduler](https://apscheduler.readthedocs.io/) - Job scheduling
-
-## 📧 Support
-
-For issues or questions:
-- Open an issue on GitHub
-- Check existing documentation
-- Review troubleshooting section
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
+- [Polymarket](https://polymarket.com)
+- [APScheduler](https://apscheduler.readthedocs.io/)
 
 ---
 
