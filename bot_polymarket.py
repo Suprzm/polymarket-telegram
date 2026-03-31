@@ -97,16 +97,32 @@ def get_from_search_cache(token_id: str):
         SELECT question, outcome, slug, event_title FROM search_cache WHERE token_id = ?
     """, (token_id,))
     row = cur.fetchone()
+    
+    # DEBUG: Log cache contents
+    cur.execute("SELECT COUNT(*) FROM search_cache")
+    total = cur.fetchone()[0]
+    logger.info(f"🔍 Search cache contains {total} tokens")
+    
     con.close()
     
     if row:
+        logger.info(f"✅ Cache HIT for token {token_id[:20]}...")
         return {
             "question": row[0],
             "outcome": row[1],
             "slug": row[2],
             "event_title": row[3]
         }
-    return None
+    else:
+        logger.warning(f"❌ Cache MISS for token {token_id[:20]}...")
+        # DEBUG: Show some tokens in cache
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("SELECT token_id FROM search_cache LIMIT 3")
+        samples = [r[0][:20] + "..." for r in cur.fetchall()]
+        logger.info(f"Sample tokens in cache: {samples}")
+        con.close()
+        return None
 
 def save_market_metadata(token_id: str, question: str, outcome: str, slug: str, event_title: str):
     """Save market metadata to permanent storage"""
@@ -261,10 +277,10 @@ def fetch_market_data(token_id: str):
                         bids = book_data.get("bids", [])
                         asks = book_data.get("asks", [])
                         
-                        best_bid = float(bids[-1]["price"]) if bids else None
-                        best_ask = float(asks[-1]["price"]) if asks else None
-                        bid_size = float(bids[-1]["size"]) if bids else None
-                        ask_size = float(asks[-1]["size"]) if asks else None
+                        best_bid = float(bids[0]["price"]) if bids else None
+                        best_ask = float(asks[0]["price"]) if asks else None
+                        bid_size = float(bids[0]["size"]) if bids else None
+                        ask_size = float(asks[0]["size"]) if asks else None
                 except:
                     pass  # CLOB data not available, that's okay
                 
@@ -356,10 +372,10 @@ def fetch_market_data(token_id: str):
                     bids = book_data.get("bids", [])
                     asks = book_data.get("asks", [])
                     
-                    best_bid = float(bids[-1]["price"]) if bids else None
-                    best_ask = float(asks[-1]["price"]) if asks else None
-                    bid_size = float(bids[-1]["size"]) if bids else None
-                    ask_size = float(asks[-1]["size"]) if asks else None
+                    best_bid = float(bids[0]["price"]) if bids else None
+                    best_ask = float(asks[0]["price"]) if asks else None
+                    bid_size = float(bids[0]["size"]) if bids else None
+                    ask_size = float(asks[0]["size"]) if asks else None
                     
                     spread = None
                     if best_bid and best_ask:
@@ -607,7 +623,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     market_info = get_from_search_cache(token_id)
     
     if market_info:
-        logger.info(f"✅ Found token in search cache, saving to permanent DB")
+        logger.info(f"✅ Found token in search cache: {market_info.get('question', 'N/A')[:50]}")
         # Save to permanent storage
         save_market_metadata(
             token_id,
@@ -618,7 +634,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         # Try permanent DB or Gamma API
-        logger.info(f"Token not in search cache, checking permanent DB or Gamma API")
+        logger.warning(f"⚠️ Token NOT in search cache, checking permanent DB or Gamma API")
         market_info = get_market_info_from_gamma(token_id)
     
     # Verify token exists by fetching price data
@@ -768,6 +784,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = resp.json()
         
         events = data.get("events", [])
+        
+        logger.info(f"📊 Found {len(events)} events from API")
         
         if not events:
             await update.message.reply_text(
