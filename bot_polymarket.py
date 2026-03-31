@@ -277,10 +277,10 @@ def fetch_market_data(token_id: str):
                         bids = book_data.get("bids", [])
                         asks = book_data.get("asks", [])
                         
-                        best_bid = float(bids[0]["price"]) if bids else None
-                        best_ask = float(asks[0]["price"]) if asks else None
-                        bid_size = float(bids[0]["size"]) if bids else None
-                        ask_size = float(asks[0]["size"]) if asks else None
+                        best_bid = float(bids[-1]["price"]) if bids else None
+                        best_ask = float(asks[-1]["price"]) if asks else None
+                        bid_size = float(bids[-1]["size"]) if bids else None
+                        ask_size = float(asks[-1]["size"]) if asks else None
                 except:
                     pass  # CLOB data not available, that's okay
                 
@@ -372,10 +372,10 @@ def fetch_market_data(token_id: str):
                     bids = book_data.get("bids", [])
                     asks = book_data.get("asks", [])
                     
-                    best_bid = float(bids[0]["price"]) if bids else None
-                    best_ask = float(asks[0]["price"]) if asks else None
-                    bid_size = float(bids[0]["size"]) if bids else None
-                    ask_size = float(asks[0]["size"]) if asks else None
+                    best_bid = float(bids[-1]["price"]) if bids else None
+                    best_ask = float(asks[-1]["price"]) if asks else None
+                    bid_size = float(bids[-1]["size"]) if bids else None
+                    ask_size = float(asks[-1]["size"]) if asks else None
                     
                     spread = None
                     if best_bid and best_ask:
@@ -783,6 +783,13 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resp.raise_for_status()
         data = resp.json()
         
+        # DEBUG: Save response to file for inspection
+        import tempfile
+        debug_file = tempfile.mktemp(suffix=".json")
+        with open(debug_file, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info(f"🔍 API response saved to: {debug_file}")
+        
         events = data.get("events", [])
         
         logger.info(f"📊 Found {len(events)} events from API")
@@ -813,8 +820,14 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title_short = title[:80] if len(title) <= 80 else title[:77] + "..."
             event_msg = f"📅 *{escape_markdown(title_short)}*\n"
             
+            logger.info(f"   Processing up to 2 markets from this event...")
+            
             # Limit to 2 markets per event
+            markets_processed = 0
             for market in markets[:2]:
+                markets_processed += 1
+                logger.info(f"   📝 Market {markets_processed}/2")
+                
                 question = market.get("question", "N/A")
                 tokens_raw = market.get("clobTokenIds", [])
                 outcomes_raw = market.get("outcomes", [])
@@ -858,11 +871,16 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             event_msg += "\n"
             
             # Check if we exceed limit
-            if len(msg + event_msg) > MAX_LENGTH:
+            new_length = len(msg + event_msg)
+            logger.info(f"   Message length: {new_length}/{MAX_LENGTH}")
+            
+            if new_length > MAX_LENGTH:
+                logger.warning(f"   ⚠️ Message too long, stopping here")
                 break
             
             msg += event_msg
             count += 1
+            logger.info(f"   ✅ Event added to message (total events: {count})")
         
         if len(events) > count:
             events_diff = len(events) - count
