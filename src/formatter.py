@@ -1,24 +1,62 @@
-import html
 from datetime import datetime
 
-def format_market_message(info, m_info):
-    if not info: return "❌ Erreur de données."
+
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Markdown V2"""
+    if text is None:
+        return "N/A"
     
-    q = html.escape(m_info.get('question', 'Marché inconnu')) if m_info else "Inconnu"
-    out = html.escape(m_info.get('outcome', 'N/A')) if m_info else "N/A"
+    text = str(text)
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
+def format_market_message(info: dict, market_info: dict = None):
+    """Format market data as Telegram message"""
+    if not info:
+        return "❌ Error: unable to fetch market data\\."
+
+    lines = ["📊 *Polymarket Update*", ""]
     
-    msg = [
-        f"📊 <b>Polymarket Update</b>",
-        f"❓ {q}",
-        f"📍 Pari : <b>{out}</b>",
+    # Always show market info if available
+    if market_info:
+        question = escape_markdown(market_info.get('question', 'N/A'))
+        outcome = escape_markdown(market_info.get('outcome', 'N/A'))
+        lines.extend([
+            f"*Market:* {question}",
+            f"*Outcome:* {outcome}",
+            ""
+        ])
+    else:
+        lines.append("*Market:* Unknown")
+        lines.append("")
+    
+    token_short = escape_markdown(str(info.get('token_id', 'N/A'))[:20] + "...")
+    mid = escape_markdown(info.get('mid_price') if info.get('mid_price') is not None else 'N/A')
+    bid = escape_markdown(info.get('best_bid') if info.get('best_bid') is not None else 'N/A')
+    ask = escape_markdown(info.get('best_ask') if info.get('best_ask') is not None else 'N/A')
+    bid_size = escape_markdown(info.get('bid_size') if info.get('bid_size') is not None else 'N/A')
+    ask_size = escape_markdown(info.get('ask_size') if info.get('ask_size') is not None else 'N/A')
+    
+    lines.extend([
+        f"🔑 *Token ID:* `{token_short}`",
         "",
-        f"💰 Prix Mid : <code>{info.get('mid_price', 'N/A')}</code>",
-        f"🟢 BID : <code>{info.get('best_bid', 'N/A')}</code> (vol: {info.get('bid_size', 'N/A')})",
-        f"🔴 ASK : <code>{info.get('best_ask', 'N/A')}</code> (vol: {info.get('ask_size', 'N/A')})",
-    ]
+        f"💰 *Mid price:* {mid}",
+        f"📈 *Best bid:* {bid} \\(size: {bid_size}\\)",
+        f"📉 *Best ask:* {ask} \\(size: {ask_size}\\)",
+    ])
     
-    if info.get('spread'):
-        msg.append(f"📏 Spread : {info['spread']}%")
-        
-    msg.append(f"\n⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC")
-    return "\n".join(msg)
+    if info.get('spread') is not None:
+        spread = escape_markdown(info.get('spread'))
+        lines.append(f"📏 *Spread:* {spread}%")
+    
+    timestamp_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = escape_markdown(timestamp_str)
+    lines.extend([
+        "",
+        f"⏰ {timestamp} UTC"
+    ])
+    
+    return "\n".join(lines)
