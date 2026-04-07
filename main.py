@@ -9,7 +9,7 @@ from src.poly_api import fetch_market_data, get_market_info_from_gamma
 from src.formatter import format_market_message
 from src.handlers import (
     start, subscribe, unsubscribe, status, check,
-    reset, confirm_reset, search, test_job
+    reset, confirm_reset, search, test_job, wallet_info
 )
 
 # Setup
@@ -92,6 +92,7 @@ def main():
     application.add_handler(CommandHandler("test", test_job))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("confirm_reset", confirm_reset))
+    application.add_handler(CommandHandler("wallet", wallet_info))
     
     # Start bot
     logger.info("🤖 Polymarket bot started")

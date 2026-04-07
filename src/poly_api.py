@@ -6,6 +6,7 @@ logger = logging.getLogger(__name__)
 
 CLOB_API = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 
 
 def fetch_market_data(token_id: str):

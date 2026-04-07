@@ -1,3 +1,4 @@
+import os
 import json
 import logging
 import requests
@@ -11,6 +12,7 @@ from .database import (
 )
 from .poly_api import fetch_market_data, get_market_info_from_gamma, GAMMA_API
 from .formatter import format_market_message, escape_markdown
+from .wallet import PolyWallet, format_wallet_message
 
 logger = logging.getLogger(__name__)
 
@@ -345,3 +347,9 @@ async def test_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await job_send_updates(application)
     
     await update.message.reply_text("✅ Updates sent!")
+
+async def wallet_info(update, context):
+    wallet = PolyWallet(os.getenv("POLY_ADDRESS"))
+    summary = wallet.get_summary()
+    msg = format_wallet_message(summary)
+    await update.message.reply_text(msg, parse_mode='HTML')

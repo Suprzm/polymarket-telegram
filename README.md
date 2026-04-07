@@ -79,6 +79,8 @@ INFO:main:✅ Scheduler started - updates every hour
 | `/check <token_id>` | Check current price | `/check 297637...` |
 | `/reset` | Delete all subscriptions | `/reset` |
 | `/test` | Manually trigger updates (debug) | `/test` |
+| `/wallet` | Get Polymarket informations | `/wallet` |
+
 
 ## 🎯 Usage Example
 
@@ -125,6 +127,9 @@ Message formatting: Markdown escaping, price display.
 
 ### `src/handlers.py`
 Telegram command handlers: search, subscribe, status, etc.
+
+### `src/wallet.py`
+Wallet data: value, P&L, open positions and last trades.
 
 ### `main.py`
 Application entry point: bot initialization, scheduler, main loop.
