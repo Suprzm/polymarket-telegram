@@ -28,7 +28,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/check <token_id>` \\- Check current price\n"
         "• `/search <term>` \\- Search for markets\n"
         "• `/reset` \\- Delete all your subscriptions\n"
-        "• `/test` \\- Test immediate send \\(debug\\)\n\n"
+        "• `/test` \\- Test immediate send \\(debug\\)\n"
+        "• `/wallet` \\- Check wallet data \n\n"
         "💡 You will receive updates every hour\\.\n\n"
         "🔍 To find a token\\_id, use `/search` or go to "
         "polymarket\\.com and get the token from the market URL\\.",
