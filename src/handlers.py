@@ -350,7 +350,7 @@ async def test_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Updates sent!")
 
 async def wallet_info(update, context):
-    wallet = PolyWallet(os.getenv("POLY_ADDRESS"))
+    wallet = PolyWallet(os.getenv("POLY_FUNDER_ADDRESS"))
     summary = wallet.get_summary()
     msg = format_wallet_message(summary)
     await update.message.reply_text(msg, parse_mode='HTML')

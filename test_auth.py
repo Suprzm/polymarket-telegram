@@ -10,35 +10,25 @@ def run_test():
     
     host = "https://clob.polymarket.com"
     key = os.getenv("POLY_PRIVATE_KEY")
-    address = os.getenv("POLY_ADDRESS")
+    funder = os.getenv("POLY_FUNDER_ADDRESS")  # Polymarket proxy address
 
-    if not key or not address:
-        print("❌ Error: POLY_PRIVATE_KEY or POLY_ADDRESS missing in .env")
+    if not key or not funder:
+        print("❌ Error: POLY_PRIVATE_KEY or POLY_FUNDER_ADDRESS missing in .env")
         return
 
     try:
-        # Initialisation
-        # signature_type=1 is standard for direct private keys
         client = ClobClient(
-            host, 
-            key=key, 
+            host,
+            key=key,
             chain_id=POLYGON,
-            signature_type=1
+            signature_type=0,   # EOA (MetaMask)
+            funder=funder
         )
         
-        # Test 1 : check local address
         derived_address = client.get_address()
-        print(f"✅ Initialized client!")
-        print(f"🤖 Wallet detected : {derived_address}")
-        
-        if derived_address.lower() != address.lower():
-            print("⚠️ Warning: The generated address does not match POLY_ADDRESS!")
-        
-        # Test 2 : API call to check account
-        print("📡 Checking your account status on Polymarket...")
-        # We're just trying to retrieve some public information using your authenticated client
-        # If it doesn't crash, it means the signature is valid
-        
+        print(f"✅ Client initialized!")
+        print(f"🔑 Signer (MetaMask): {derived_address}")
+        print(f"💼 Funder (Proxy):    {funder}")
         print("✨ Everything looks ready for trading!")
 
     except Exception as e:
