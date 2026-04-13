@@ -13,6 +13,8 @@ from .database import (
 from .poly_api import fetch_market_data, get_market_info_from_gamma, GAMMA_API
 from .formatter import format_market_message, escape_markdown
 from .wallet import PolyWallet, format_wallet_message
+from .trading import MMConfig, start_mm, stop_mm, stop_all_mm, list_active_mm
+
 
 logger = logging.getLogger(__name__)
 
@@ -354,3 +356,137 @@ async def wallet_info(update, context):
     summary = wallet.get_summary()
     msg = format_wallet_message(summary)
     await update.message.reply_text(msg, parse_mode='HTML')
+
+def _make_notify_cb(application, chat_id: int):
+    """Returns an async-safe notification callback for the MM loop."""
+    import asyncio
+
+    def notify(message: str):
+        asyncio.create_task(
+            application.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="HTML"
+            )
+        )
+    return notify
+
+
+async def startmm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /startmm <token_id> [spread] [size] [threshold]
+
+    Examples:
+        /startmm 0xabc123...
+        /startmm 0xabc123... 0.04 5 0.02
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: <code>/startmm &lt;token_id&gt; [spread] [size] [threshold]</code>\n\n"
+            "Defaults: spread=0.04, size=5.0, threshold=0.02\n\n"
+            "Example:\n<code>/startmm 0xabc123... 0.04 5.0 0.02</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    token_id = context.args[0].strip()
+
+    # Optional params with defaults
+    try:
+        spread = float(context.args[1]) if len(context.args) > 1 else 0.04
+        size = float(context.args[2]) if len(context.args) > 2 else 5.0
+        threshold = float(context.args[3]) if len(context.args) > 3 else 0.02
+    except ValueError:
+        await update.message.reply_text("❌ Invalid parameters. spread/size/threshold must be numbers.")
+        return
+
+    cfg = MMConfig(
+        token_id=token_id,
+        spread=spread,
+        size=size,
+        mid_threshold=threshold,
+    )
+
+    notify_cb = _make_notify_cb(context.application, update.effective_chat.id)
+    started = start_mm(token_id, cfg, notify_cb)
+
+    if not started:
+        await update.message.reply_text(
+            f"⚠️ MM already running for <code>{token_id[:20]}...</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(
+        f"🚀 <b>Market maker started!</b>\n\n"
+        f"Token: <code>{token_id[:20]}...</code>\n"
+        f"Spread: {spread*100:.1f}% (mid ± {spread/2*100:.1f}%)\n"
+        f"Size: ${size} per order\n"
+        f"Replace threshold: {threshold*100:.1f}%\n\n"
+        f"You'll be notified on fills and quote updates.",
+        parse_mode="HTML"
+    )
+
+
+async def stopmm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /stopmm <token_id>   → stop MM on one token
+    /stopmm all          → emergency stop all
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "<code>/stopmm &lt;token_id&gt;</code>\n"
+            "<code>/stopmm all</code> — emergency stop",
+            parse_mode="HTML"
+        )
+        return
+
+    arg = context.args[0].strip()
+
+    if arg.lower() == "all":
+        count = stop_all_mm()
+        await update.message.reply_text(
+            f"🛑 <b>Emergency stop</b> — {count} market maker(s) stopped.\n"
+            f"All orders cancelled.",
+            parse_mode="HTML"
+        )
+        return
+
+    stopped = stop_mm(arg)
+    if stopped:
+        await update.message.reply_text(
+            f"🛑 MM stopped for <code>{arg[:20]}...</code>\n"
+            f"Orders are being cancelled.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ No active MM found for <code>{arg[:20]}...</code>",
+            parse_mode="HTML"
+        )
+
+
+async def mmstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/mmstatus — show all active market makers"""
+    active = list_active_mm()
+
+    if not active:
+        await update.message.reply_text(
+            "😴 No active market makers.\n"
+            "Use <code>/startmm &lt;token_id&gt;</code> to start one.",
+            parse_mode="HTML"
+        )
+        return
+
+    lines = [f"🤖 <b>{len(active)} active market maker(s)</b>\n"]
+    for mm in active:
+        mid_str = f"{mm['mid_ref']:.3f}" if mm['mid_ref'] else "pending"
+        lines.append(
+            f"📍 <code>{mm['token_id'][:20]}...</code>\n"
+            f"   Mid ref: {mid_str} | Spread: {mm['spread']*100:.1f}% | Size: ${mm['size']}\n"
+            f"   BUY  order: <code>{(mm['bid_order_id'] or 'none')[:16]}</code>\n"
+            f"   SELL order: <code>{(mm['ask_order_id'] or 'none')[:16]}</code>\n"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
